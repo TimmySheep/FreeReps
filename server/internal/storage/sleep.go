@@ -67,6 +67,10 @@ func (db *DB) InsertSleepStages(ctx context.Context, rows []models.SleepStageRow
 type SleepSessionResult struct {
 	models.SleepSessionRow
 	ID int64
+	// Derived marks a session read from the sleep category samples at query
+	// time rather than stored. Omitted for stored rows, so their JSON does not
+	// change.
+	Derived bool `json:"derived,omitempty"`
 }
 
 // QuerySleepSessions retrieves sleep sessions in a date range.

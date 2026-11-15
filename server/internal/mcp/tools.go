@@ -93,7 +93,7 @@ var toolGetCorrelation = newReadTool("get_correlation",
 )
 
 var toolGetSleepData = newReadTool("get_sleep_data",
-	mcp.WithDescription("Retrieve individual sleep sessions and sleep stages. Sessions include total sleep, stage durations (core/deep/REM), and timing. Stages are individual segments with start/end times. For averages over weeks or months use get_sleep_summary."),
+	mcp.WithDescription("Retrieve individual sleep sessions and sleep stages. Sessions include total sleep, stage durations (core/deep/REM), and timing. Stages are individual segments with start/end times. A date a source wrote a session for reports that stored row; a night that arrived only as HealthKit sleep-analysis samples is derived at query time and marked \"derived\": true. For averages over weeks or months use get_sleep_summary."),
 	mcp.WithString("start", mcp.Description(descStart + " Defaults to 7 days ago.")),
 	mcp.WithString("end", mcp.Description(descEnd + " Defaults to now.")),
 )
@@ -150,7 +150,7 @@ var toolGetStrengthE1RM = newReadTool("get_strength_1rm",
 )
 
 var toolGetSleepSummary = newReadTool("get_sleep_summary",
-	mcp.WithDescription("Aggregated sleep stats per week or month: duration, stage percentages, efficiency, bedtime/waketime consistency. For individual nights use get_sleep_data."),
+	mcp.WithDescription("Aggregated sleep stats per week or month: duration, stage percentages, efficiency, bedtime/waketime consistency. Covers the same nights get_sleep_data reports, including those derived from HealthKit sleep-analysis samples. For individual nights use get_sleep_data."),
 	mcp.WithString("start", mcp.Description(descStart + " Defaults to 90 days ago.")),
 	mcp.WithString("end", mcp.Description(descEnd + " Defaults to now.")),
 	mcp.WithString("bucket", mcp.Description("Aggregation period. Defaults to '1 month'."), mcp.Enum("1 week", "1 month")),
@@ -301,15 +301,9 @@ func (h *handlers) getSleepData(ctx context.Context, req mcp.CallToolRequest) (*
 
 	uid := UserIDFromContext(ctx)
 
-	sessions, err := h.ds.QuerySleepSessions(ctx, start, end, uid)
+	sessions, stages, err := h.ds.QuerySleepData(ctx, start, end, uid)
 	if err != nil {
-		h.log.Error("mcp get_sleep_data sessions", "error", err)
-		return mcp.NewToolResultError("query failed: " + err.Error()), nil
-	}
-
-	stages, err := h.ds.QuerySleepStages(ctx, start, end, uid)
-	if err != nil {
-		h.log.Error("mcp get_sleep_data stages", "error", err)
+		h.log.Error("mcp get_sleep_data", "error", err)
 		return mcp.NewToolResultError("query failed: " + err.Error()), nil
 	}
 

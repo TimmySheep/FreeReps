@@ -4,134 +4,137 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"time"
 )
 
 // SleepSummaryPeriod holds aggregated sleep stats for one time period.
 type SleepSummaryPeriod struct {
-	Period                    string  `json:"period"`
-	Nights                    int     `json:"nights"`
-	AvgTotalSleepHr           float64 `json:"avg_total_sleep_hr"`
-	AvgDeepHr                 float64 `json:"avg_deep_hr"`
-	AvgREMHr                  float64 `json:"avg_rem_hr"`
-	AvgCoreHr                 float64 `json:"avg_core_hr"`
-	AvgInBedHr                float64 `json:"avg_in_bed_hr"`
-	AvgEfficiencyPct          float64 `json:"avg_efficiency_pct"`
-	AvgDeepPct                float64 `json:"avg_deep_pct"`
-	AvgREMPct                 float64 `json:"avg_rem_pct"`
-	AvgBedtime                string  `json:"avg_bedtime"`
-	AvgWaketime               string  `json:"avg_waketime"`
-	BedtimeConsistencyStdHr   float64 `json:"bedtime_consistency_stddev_hr"`
-	WaketimeConsistencyStdHr  float64 `json:"waketime_consistency_stddev_hr"`
+	Period                   string  `json:"period"`
+	Nights                   int     `json:"nights"`
+	AvgTotalSleepHr          float64 `json:"avg_total_sleep_hr"`
+	AvgDeepHr                float64 `json:"avg_deep_hr"`
+	AvgREMHr                 float64 `json:"avg_rem_hr"`
+	AvgCoreHr                float64 `json:"avg_core_hr"`
+	AvgInBedHr               float64 `json:"avg_in_bed_hr"`
+	AvgEfficiencyPct         float64 `json:"avg_efficiency_pct"`
+	AvgDeepPct               float64 `json:"avg_deep_pct"`
+	AvgREMPct                float64 `json:"avg_rem_pct"`
+	AvgBedtime               string  `json:"avg_bedtime"`
+	AvgWaketime              string  `json:"avg_waketime"`
+	BedtimeConsistencyStdHr  float64 `json:"bedtime_consistency_stddev_hr"`
+	WaketimeConsistencyStdHr float64 `json:"waketime_consistency_stddev_hr"`
 }
 
-// sleepTimingRow holds raw timing data from the DB for circular mean computation.
-type sleepTimingRow struct {
-	period     time.Time
-	sleepStart time.Time
-	sleepEnd   time.Time
-}
-
-// GetSleepSummary returns aggregated sleep stats per period with circular bedtime/waketime averages.
+// GetSleepSummary returns aggregated sleep stats per period with circular
+// bedtime/waketime averages.
+//
+// The sessions come from QuerySleepData, so a period also holds the nights
+// derived from sleep category samples where no source wrote a session row. The
+// aggregation runs here rather than in SQL because those derived nights are not
+// rows in sleep_sessions; it is the same set of averages the two SQL queries
+// computed over the table alone.
 func (db *DB) GetSleepSummary(ctx context.Context, start, end time.Time, bucket string, userID int) ([]SleepSummaryPeriod, error) {
-	trunc := truncInterval(bucket)
-
-	// Query 1: Aggregated duration/stage stats per period
-	aggRows, err := db.Pool.Query(ctx,
-		`SELECT date_trunc($1, date)::date AS period,
-		        COUNT(*)::int AS nights,
-		        AVG(total_sleep),
-		        AVG(deep),
-		        AVG(rem),
-		        AVG(core),
-		        AVG(in_bed),
-		        AVG(CASE WHEN in_bed > 0 THEN total_sleep / in_bed * 100 ELSE 0 END),
-		        AVG(CASE WHEN total_sleep > 0 THEN deep / total_sleep * 100 ELSE 0 END),
-		        AVG(CASE WHEN total_sleep > 0 THEN rem / total_sleep * 100 ELSE 0 END)
-		 FROM sleep_sessions
-		 WHERE date >= $2 AND date < $3 AND user_id = $4
-		 GROUP BY period
-		 ORDER BY period DESC`,
-		trunc, start, end, userID)
+	sessions, _, err := db.QuerySleepData(ctx, start, end, userID)
 	if err != nil {
 		return nil, fmt.Errorf("querying sleep summary: %w", err)
 	}
-	defer aggRows.Close()
+	return SummarizeSleepSessions(sessions, bucket), nil
+}
 
-	periodMap := make(map[string]*SleepSummaryPeriod)
-	var periodOrder []string
-
-	for aggRows.Next() {
-		var periodTime time.Time
-		var sp SleepSummaryPeriod
-		if err := aggRows.Scan(&periodTime, &sp.Nights,
-			&sp.AvgTotalSleepHr, &sp.AvgDeepHr, &sp.AvgREMHr, &sp.AvgCoreHr, &sp.AvgInBedHr,
-			&sp.AvgEfficiencyPct, &sp.AvgDeepPct, &sp.AvgREMPct); err != nil {
-			return nil, fmt.Errorf("scanning sleep summary: %w", err)
-		}
-		sp.Period = periodTime.Format("2006-01-02")
-		periodMap[sp.Period] = &sp
-		periodOrder = append(periodOrder, sp.Period)
-	}
-	if err := aggRows.Err(); err != nil {
-		return nil, err
-	}
-
-	// Query 2: Raw sleep_start/sleep_end for circular mean computation
-	timingRows, err := db.Pool.Query(ctx,
-		`SELECT date_trunc($1, date)::date AS period, sleep_start, sleep_end
-		 FROM sleep_sessions
-		 WHERE date >= $2 AND date < $3 AND user_id = $4
-		 ORDER BY period, date`,
-		trunc, start, end, userID)
-	if err != nil {
-		return nil, fmt.Errorf("querying sleep timing: %w", err)
-	}
-	defer timingRows.Close()
-
-	// Group timing rows by period
-	timingByPeriod := make(map[string][]sleepTimingRow)
-	for timingRows.Next() {
-		var t sleepTimingRow
-		if err := timingRows.Scan(&t.period, &t.sleepStart, &t.sleepEnd); err != nil {
-			return nil, fmt.Errorf("scanning sleep timing: %w", err)
-		}
-		key := t.period.Format("2006-01-02")
-		timingByPeriod[key] = append(timingByPeriod[key], t)
-	}
-	if err := timingRows.Err(); err != nil {
-		return nil, err
+// SummarizeSleepSessions aggregates sessions into one SleepSummaryPeriod per
+// bucket, newest bucket first.
+func SummarizeSleepSessions(sessions []SleepSessionResult, bucket string) []SleepSummaryPeriod {
+	type accumulator struct {
+		period SleepSummaryPeriod
+		total  float64
+		deep   float64
+		rem    float64
+		core   float64
+		inBed  float64
+		// Percentages are averaged per night, and a night without time in bed
+		// contributes 0 rather than being left out, which is how the SQL
+		// AVG(CASE WHEN in_bed > 0 ...) read it.
+		efficiency float64
+		deepPct    float64
+		remPct     float64
+		bedtimes   []float64
+		waketimes  []float64
 	}
 
-	// Compute circular mean bedtime/waketime per period
-	for key, timings := range timingByPeriod {
-		sp, ok := periodMap[key]
+	byPeriod := make(map[string]*accumulator)
+	var order []string
+
+	for _, s := range sessions {
+		key := bucketStart(s.Date, bucket).Format("2006-01-02")
+		acc, ok := byPeriod[key]
 		if !ok {
-			continue
+			acc = &accumulator{period: SleepSummaryPeriod{Period: key}}
+			byPeriod[key] = acc
+			order = append(order, key)
 		}
 
-		bedtimeHours := make([]float64, 0, len(timings))
-		waketimeHours := make([]float64, 0, len(timings))
-		for _, t := range timings {
-			bedtimeHours = append(bedtimeHours, timeToHourOfDay(t.sleepStart))
-			waketimeHours = append(waketimeHours, timeToHourOfDay(t.sleepEnd))
+		acc.period.Nights++
+		acc.total += s.TotalSleep
+		acc.deep += s.Deep
+		acc.rem += s.REM
+		acc.core += s.Core
+		acc.inBed += s.InBed
+		if s.InBed > 0 {
+			acc.efficiency += s.TotalSleep / s.InBed * 100
 		}
-
-		avgBed, stdBed := circularMeanStd(bedtimeHours)
-		avgWake, stdWake := circularMeanStd(waketimeHours)
-
-		sp.AvgBedtime = hoursToHHMM(avgBed)
-		sp.AvgWaketime = hoursToHHMM(avgWake)
-		sp.BedtimeConsistencyStdHr = math.Round(stdBed*100) / 100
-		sp.WaketimeConsistencyStdHr = math.Round(stdWake*100) / 100
+		if s.TotalSleep > 0 {
+			acc.deepPct += s.Deep / s.TotalSleep * 100
+			acc.remPct += s.REM / s.TotalSleep * 100
+		}
+		if !s.SleepStart.IsZero() {
+			acc.bedtimes = append(acc.bedtimes, timeToHourOfDay(s.SleepStart))
+		}
+		if !s.SleepEnd.IsZero() {
+			acc.waketimes = append(acc.waketimes, timeToHourOfDay(s.SleepEnd))
+		}
 	}
 
-	// Assemble result
-	result := make([]SleepSummaryPeriod, 0, len(periodOrder))
-	for _, key := range periodOrder {
-		result = append(result, *periodMap[key])
+	sort.Sort(sort.Reverse(sort.StringSlice(order)))
+
+	result := make([]SleepSummaryPeriod, 0, len(order))
+	for _, key := range order {
+		acc := byPeriod[key]
+		nights := float64(acc.period.Nights)
+
+		acc.period.AvgTotalSleepHr = acc.total / nights
+		acc.period.AvgDeepHr = acc.deep / nights
+		acc.period.AvgREMHr = acc.rem / nights
+		acc.period.AvgCoreHr = acc.core / nights
+		acc.period.AvgInBedHr = acc.inBed / nights
+		acc.period.AvgEfficiencyPct = acc.efficiency / nights
+		acc.period.AvgDeepPct = acc.deepPct / nights
+		acc.period.AvgREMPct = acc.remPct / nights
+
+		avgBed, stdBed := circularMeanStd(acc.bedtimes)
+		avgWake, stdWake := circularMeanStd(acc.waketimes)
+		acc.period.AvgBedtime = hoursToHHMM(avgBed)
+		acc.period.AvgWaketime = hoursToHHMM(avgWake)
+		acc.period.BedtimeConsistencyStdHr = math.Round(stdBed*100) / 100
+		acc.period.WaketimeConsistencyStdHr = math.Round(stdWake*100) / 100
+
+		result = append(result, acc.period)
 	}
-	return result, nil
+	return result
+}
+
+// bucketStart truncates a session date to the bucket that holds it, matching
+// what date_trunc returned for the same rows: weeks start on Monday, months on
+// the first, and an unknown bucket reads as a month.
+func bucketStart(date time.Time, bucket string) time.Time {
+	day := date.UTC().Truncate(24 * time.Hour)
+	if truncInterval(bucket) == "week" {
+		// Monday-based, as date_trunc('week') is: Sunday is 7 days into its own
+		// week rather than 6 before it.
+		offset := (int(day.Weekday()) + 6) % 7
+		return day.AddDate(0, 0, -offset)
+	}
+	return time.Date(day.Year(), day.Month(), 1, 0, 0, 0, 0, time.UTC)
 }
 
 // timeToHourOfDay extracts fractional hour of day from a time.Time.
