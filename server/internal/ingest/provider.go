@@ -27,6 +27,13 @@ type Result struct {
 	StateOfMindInserted      int64 `json:"state_of_mind_inserted,omitempty"`
 	CategorySamplesInserted  int64 `json:"category_samples_inserted,omitempty"`
 
+	// SleepStageSamplesFiltered counts sleep category samples left out of the
+	// derived sleep stages because another source outranks them
+	// (health.selectSleepStageSource). Only one source's stages are derived,
+	// so a night that arrives from Apple Health, AutoSleep and Zepp Life does
+	// not count three times.
+	SleepStageSamplesFiltered int `json:"sleep_stage_samples_filtered,omitempty"`
+
 	// SourceCopiesDropped counts workouts and category samples a provider
 	// wrote into HealthKit that FreeReps also syncs from that provider directly
 	// (health.sourcePolicy).

@@ -102,7 +102,13 @@ var sleepSyncSources = []string{"Oura", "Withings"}
 // user configured: when sleep belongs to a syncing provider, this endpoint
 // leaves sleep alone. Everything else in the payload is unaffected.
 func (p *Provider) sleepClaimedBySync(ctx context.Context, userID int) (string, bool) {
-	priorities := p.db.ResolveSourcePriority(ctx, userID, "sleep")
+	return sleepOwner(p.db.ResolveSourcePriority(ctx, userID, "sleep"))
+}
+
+// sleepOwner applies the rule of sleepClaimedBySync to an already resolved
+// priority list, so one ingest resolves the priorities once and uses them for
+// both the claim check and the source selection of the derived stages.
+func sleepOwner(priorities []string) (string, bool) {
 	if len(priorities) == 0 {
 		return "", false
 	}
@@ -888,46 +894,26 @@ func (p *Provider) processCategorySamples(ctx context.Context, samples []models.
 	}
 
 	// Extract sleep stages from sleep category samples.
-	if owner, claimed := p.sleepClaimedBySync(ctx, userID); claimed {
+	//
+	// One priority lookup serves both decisions below: whether a provider with
+	// its own sleep sync owns the night, and which source's category samples
+	// become the stages.
+	priorities := p.db.ResolveSourcePriority(ctx, userID, "sleep")
+	if owner, claimed := sleepOwner(priorities); claimed {
 		p.log.Debug("skipping sleep stages from category samples",
 			"owner", owner, "reason", "sleep is resolved to a source with its own sync")
 		p.advanceCheckpoint(ctx, userID, DomainCategorySamples, newest)
 		return nil
 	}
 
-	var sleepStages []models.SleepStageRow
-	for _, cs := range samples {
-		if !strings.EqualFold(cs.Type, "HKCategoryTypeIdentifierSleepAnalysis") &&
-			!strings.EqualFold(cs.Type, "sleep_analysis") &&
-			!strings.Contains(strings.ToLower(cs.Type), "sleep") {
-			continue
-		}
-		if cs.ValueLabel == nil {
-			continue
-		}
-		label := *cs.ValueLabel
-		// Strip "Asleep " prefix: "Asleep Core" → "Core", "Asleep Deep" → "Deep", etc.
-		if after, ok := strings.CutPrefix(label, "Asleep "); ok {
-			if after == "Unspecified" {
-				label = "Asleep"
-			} else {
-				label = after
-			}
-		}
-		stage, known := models.NormalizeSleepStage(label)
-		if !known {
-			p.log.Warn("unknown sleep stage from category sample, storing as-is", "raw", label)
-		}
-		sleepStages = append(sleepStages, models.SleepStageRow{
-			StartTime:    cs.StartDate.Time,
-			EndTime:      cs.EndDate.Time,
-			UserID:       userID,
-			Stage:        stage,
-			DurationHr:   cs.EndDate.Time.Sub(cs.StartDate.Time).Hours(),
-			Source:       cs.Source,
-			SourceBundle: cs.SourceBundle,
-		})
+	kept, source, filtered := selectSleepStageSource(sleepSamplesOf(samples), priorities)
+	if filtered > 0 {
+		result.SleepStageSamplesFiltered += filtered
+		p.log.Info("derived sleep stages from one source only",
+			"source", source, "samples", len(kept), "filtered", filtered)
 	}
+
+	sleepStages := buildSleepStageRows(kept, userID, p.log)
 	if len(sleepStages) > 0 {
 		inserted, err := p.db.InsertSleepStages(ctx, sleepStages)
 		if err != nil {
