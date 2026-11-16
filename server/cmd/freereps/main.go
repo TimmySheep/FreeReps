@@ -41,6 +41,10 @@ var BuildSHA = "dev"
 func main() {
 	configPath := flag.String("config", "config.yaml", "path to config file")
 	migrateOnly := flag.Bool("migrate-only", false, "run migrations and exit")
+	rederiveSleep := flag.Bool("rederive-sleep", false, "re-derive sleep stages from the category samples already stored, then exit")
+	rederiveFrom := flag.String("rederive-from", "", "first day to re-derive (2006-01-02, UTC); empty means the beginning of the data")
+	rederiveTo := flag.String("rederive-to", "", "last day to re-derive (2006-01-02, UTC, inclusive); empty means today")
+	rederiveUser := flag.Int("rederive-user", 0, "user ID to re-derive sleep stages for, required with -rederive-sleep")
 	mcpMode := flag.Bool("mcp", false, "run as MCP server over stdio (for Claude Code integration)")
 	demoMode := flag.Bool("demo", false, "seed database with demo data for testing")
 	flag.Parse()
@@ -103,6 +107,49 @@ func main() {
 	// order makes no difference, because nothing seeds.
 	if err := db.BackfillSleepSessions(ctx, log); err != nil {
 		log.Warn("sleep session backfill failed", "error", err)
+	}
+
+	// Re-derive sleep stages from the category samples already stored.
+	//
+	// The ingest path derives stages from what a client sends, and the iOS app
+	// syncs incrementally: its anchor query delivers what was added since the
+	// last run plus the last 24 hours, and even a full sync resumes from the
+	// server's checkpoints minus a week. Nights stored before a change to the
+	// derivation are therefore never re-sent, and this is how they are rebuilt
+	// without asking the phone for its history. Idempotent — see
+	// health.ReDeriveSleepStages.
+	if *rederiveSleep {
+		if *rederiveUser <= 0 {
+			log.Error("-rederive-sleep needs -rederive-user")
+			os.Exit(1)
+		}
+		from, to, err := rederiveRange(*rederiveFrom, *rederiveTo)
+		if err != nil {
+			log.Error("invalid -rederive range", "error", err)
+			os.Exit(1)
+		}
+		report, err := health.NewProvider(db, log).ReDeriveSleepStages(ctx, *rederiveUser, from, to)
+		if err != nil {
+			log.Error("re-deriving sleep stages failed", "error", err)
+			os.Exit(1)
+		}
+		if report.Skipped != "" {
+			log.Info("sleep stages left alone", "reason", report.Skipped)
+			return
+		}
+		log.Info("sleep stages re-derived",
+			"user_id", *rederiveUser,
+			"from", from.Format("2006-01-02"), "to", to.Format("2006-01-02"),
+			"source", report.Source, "samples_used", report.SamplesUsed,
+			"samples_filtered", report.SamplesFiltered,
+			"stages", report.Stages, "stages_inserted", report.StagesInserted)
+		// sleep_sessions are built from the stages, so they are rebuilt from
+		// the result rather than left to the next start.
+		if err := db.BackfillSleepSessions(ctx, log); err != nil {
+			log.Error("sleep session backfill failed", "error", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	// MCP stdio mode: serve MCP protocol over stdin/stdout, then exit
@@ -270,4 +317,38 @@ func main() {
 		log.Error("shutdown error", "error", err)
 	}
 	log.Info("server stopped")
+}
+
+// rederiveRange turns the -rederive-from and -rederive-to flags into the
+// half-open range the category sample query reads. Dates are UTC calendar
+// days, and -rederive-to is inclusive: the whole day it names is read, so a
+// range given as the two days a night touches covers that night.
+//
+// An empty flag leaves that end open — the beginning of the data below, the
+// end of today above — which is what a first run over all stored samples
+// wants.
+func rederiveRange(from, to string) (time.Time, time.Time, error) {
+	start := time.Date(1970, 1, 1, 0, 0, 0, 0, time.UTC)
+	if from != "" {
+		day, err := time.Parse("2006-01-02", from)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("-rederive-from %q is not a date (2006-01-02): %w", from, err)
+		}
+		start = day
+	}
+
+	end := time.Now().UTC().Truncate(24*time.Hour).AddDate(0, 0, 1)
+	if to != "" {
+		day, err := time.Parse("2006-01-02", to)
+		if err != nil {
+			return time.Time{}, time.Time{}, fmt.Errorf("-rederive-to %q is not a date (2006-01-02): %w", to, err)
+		}
+		end = day.AddDate(0, 0, 1)
+	}
+
+	if !end.After(start) {
+		return time.Time{}, time.Time{}, fmt.Errorf("-rederive-to %s ends before -rederive-from %s",
+			end.AddDate(0, 0, -1).Format("2006-01-02"), start.Format("2006-01-02"))
+	}
+	return start, end, nil
 }
