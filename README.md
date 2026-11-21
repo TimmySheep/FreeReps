@@ -1,3 +1,22 @@
+<!--readme-header-->
+<p align="center">
+  <img src="app/Assets/Icon%20Exports/Icon-iOS-Default-1024x1024@1x.png" width="128" alt="FreeReps icon">
+</p>
+
+<h1 align="center">FreeReps</h1>
+
+<p align="center">
+  <b>自托管的健康数据中心：可视化看板与 MCP 接口</b><br>
+  <sub>Self-hosted health data server with dashboard and MCP interface</sub>
+</p>
+
+<p align="center"><img alt="platform" src="https://img.shields.io/badge/platform-Self-hosted%20%C2%B7%20iOS-2F81F7?logo=go&logoColor=white"><img alt="license" src="https://img.shields.io/github/license/TimmySheep/FreeReps?label=license&color=green"></p>
+
+<p align="center"><sub>Fork of <a href="https://github.com/meltforce/FreeReps">meltforce/FreeReps</a></sub></p>
+
+---
+<!--/readme-header-->
+
 > **Fork note · 关于本 fork**
 > This repository is a fork of [meltforce/FreeReps](https://github.com/meltforce/FreeReps).
 > Upstream authorship and licensing are unchanged; the upstream README follows verbatim below.
