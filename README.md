@@ -1,3 +1,11 @@
+> **Fork note · 关于本 fork**
+> This repository is a fork of [meltforce/FreeReps](https://github.com/meltforce/FreeReps).
+> Upstream authorship and licensing are unchanged; the upstream README follows verbatim below.
+> Work on this fork lives on side branches; `main` tracks upstream.
+> 本仓库是 meltforce/FreeReps 的 fork，作者与许可证以上游为准，以下是上游 README 原文。本 fork 的改动在侧分支上，`main` 跟随上游。
+
+---
+
 # FreeReps
 
 **F**reely hosted **Re**cords, **E**valuation & **P**rocessing **S**erver
